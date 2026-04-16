@@ -1,0 +1,21 @@
+{
+  "name": "backend",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --hot server.ts",
+    "start": "bun run server.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/express": "^5.0.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "minio": "^8.0.7",
+    "postgres": "^3.4.9"
+  }
+}
