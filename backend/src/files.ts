@@ -1,7 +1,8 @@
 import { randomUUIDv7 } from "bun";
 import { MAX_CHUNK_SIZE } from "./constants";
 import { createMultipartUpload, abortFileUpload, completeUpload } from "./minio";
-import { createUploadRecord, getUploadByUploadId, markUploadAborted, markUploadCompleted, setUploadErrorReason } from "./upload";
+import { createUploadRecord, getFiles, getUploadByUploadId, markUploadForDeletion, markUploadAborted, markUploadCompleted, setErrorReason, setUploadsDeleted } from "./upload";
+import type { UploadRecord } from "./models/models";
 
 const getChunksForFile = (fileSize: number) => {
     return Math.ceil(fileSize / MAX_CHUNK_SIZE);
@@ -29,7 +30,16 @@ export const startUploadSession = async (fileName: string, fileSize: number, con
         console.log("ROW START:", row);
         return session;
     } catch (error) {
-        await abortFileUpload(objectKey, session.uploadId);
+        const aborted = await abortFileUpload(objectKey, session.uploadId);
+
+        if (!aborted) {
+            console.error("Rollback abort failed", {
+                uploadId: session.uploadId,
+                objectKey,
+            });
+            
+        }
+
         throw error;
     }
 }
@@ -38,28 +48,24 @@ export const startUploadSession = async (fileName: string, fileSize: number, con
 export const uploadCompletion = async (uploadId: string, parts: { part: number; etag?: string | undefined; }[]) => {
 
     //fetch data from SQL to verify record then send for verification on minio side
-    const uploadedRecord = await getUploadByUploadId(uploadId);
+    const uploadedRecord = ensureUploadExists(await getUploadByUploadId(uploadId), uploadId);
 
-    if (!uploadedRecord) {
-        throw new Error("No uploads found for ID: " + uploadId);
+    if (uploadedRecord.status !== "initiated") {
+        throw new Error("Cannot complete this upload.");
     }
 
     const result = await completeUpload(uploadedRecord.object_key, uploadId, parts);
 
-    if (!result.completionResult || !result.objectInfo)
-        return {
-            status: "error",
-            reason: "File upload was corrupted or didn't complete. Please try again."
-        };
+    if (!result.completionResult || !result.objectInfo) {
+        throw new Error("File upload was corrupted or didn't complete. Please try again.");
+    }
 
     const row = await markUploadCompleted(uploadId, result.objectInfo.etag);
-
+    
     console.log("ROW COMPLETE: ", row);
-    if (!row)
-        return {
-            status: "error",
-            reason: "Couldn't mark upload completed. Please try again."
-        }
+    if (!row) {
+        throw new Error("Couldn't mark upload completed. Please try again.");
+    }
 
     return {
         status: "complete",
@@ -70,38 +76,29 @@ export const uploadCompletion = async (uploadId: string, parts: { part: number; 
 
 export const uploadAbortion = async (uploadId: string) => {
 
-    const uploadedRecord = await getUploadByUploadId(uploadId);
-
-    if (!uploadedRecord) {
-        throw new Error("No uploads found for ID: " + uploadId);
-    }
-
-    if (uploadedRecord.status === "completed") {
-        throw new Error("Completed upload cannot be aborted");
-    }
-
+    const uploadedRecord = ensureUploadExists(await getUploadByUploadId(uploadId), uploadId);
+    
     if (uploadedRecord.status === "aborted") {
         return { status: "aborted", uploadId };
     }
 
+    if (uploadedRecord.status !== "initiated") {
+        throw new Error("Cannot abort this upload.");
+    }
+    
     const result = await abortFileUpload(uploadedRecord.object_key, uploadId);
 
     if (!result) {
-        await setUploadErrorReason(uploadId, "Failed to abort upload in storage. Please retry.");
-        return {
-            status: "error",
-            reason: "Failed to abort upload in storage. Please retry."
-        };
+        await setErrorReason(uploadId, "Failed to abort upload in storage. Please retry.");
+        throw new Error("Failed to abort upload in storage. Please retry.");
+
     }
 
     const row = await markUploadAborted(uploadId, uploadedRecord.object_key);
 
     console.log("ROW ABORT: ", row);
     if (!row)
-        return {
-            status: "error",
-            reason: "Couldn't mark upload aborted. Please try again."
-        }
+        throw new Error("Couldn't mark upload aborted. Please try again.");
 
     return {
         status: "aborted",
@@ -109,6 +106,35 @@ export const uploadAbortion = async (uploadId: string) => {
     }
 }
 
+export const getUploadedFiles = async () => {
+    const files = await getFiles();
+    return files;
+}
+
+export const markSelectedFilesForDeletion = async (fileIds: string[]) => {
+    
+    const updatedRows = await markUploadForDeletion(fileIds);
+
+    const markedIds = updatedRows.map(row => row.upload_id);
+
+    const skippedIds = fileIds.filter(id => !markedIds.includes(id));
+
+    return {
+        status: skippedIds.length > 0 ? "partial" : "ok",
+        markedIds,
+        skippedIds,
+    }
+}
+
 const getObjectKey = (fileName: string) => {
     return randomUUIDv7() + "_" + fileName;
+}
+
+const ensureUploadExists = (uploadedRecord: UploadRecord | null, uploadId: string) => {
+
+    if (!uploadedRecord) {
+        throw new Error("No uploads found for ID: " + uploadId);
+    }
+
+    return uploadedRecord;
 }

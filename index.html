@@ -16,52 +16,21 @@
                 Pick a large file, split it into chunks in the browser, and send each part to your TypeScript server.
             </p>
 
-            <label class="dropzone" for="fileInput">
-                <span class="dropzone-title">Choose a file to upload</span>
-                <span class="dropzone-copy">Designed for large files, multipart uploads, and resume support.</span>
-                <span class="dropzone-action">Browse Files</span>
-            </label>
-
             <input type="file" id="fileInput">
 
-            <div class="file-summary">
-                <div class="summary-item">
-                    <span class="summary-label">Selected file</span>
-                    <strong id="selectedFileName">No file selected</strong>
-                </div>
-                <div class="summary-grid">
-                    <div class="metric">
-                        <span class="summary-label">Chunk size</span>
-                        <strong id="chunkSizeValue">10 MB</strong>
-                    </div>
-                    <div class="metric">
-                        <span class="summary-label">Estimated chunks</span>
-                        <strong id="chunkCountValue">0</strong>
+            <section class="file-panel">
+                <div class="file-panel-toolbar">
+                    <span class="file-panel-title">Files</span>
+                    <div class="file-panel-actions">
+                        <button id="deleteButton" class="toolbar-btn toolbar-btn--danger" type="button" title="Delete selected">Delete</button>
+                        <button id="refreshButton" class="toolbar-btn toolbar-btn--ghost" type="button" title="Refresh file list">&#x21bb;</button>
+                        <button id="addButton" class="toolbar-btn toolbar-btn--primary" type="button" title="Add file">+</button>
                     </div>
                 </div>
-            </div>
-
-            <div class="actions-row">
-                <button id="uploadButton" type="button">Start Upload</button>
-                <span id="statusText" class="status-pill">Idle</span>
-            </div>
-
-            <section class="progress-panel" aria-label="Upload status">
-                <div class="progress-head">
-                    <span>Upload Status</span>
-                </div>
-                <p id="backendStatus" class="backend-status">No upload started.</p>
-            </section>
-
-            <!-- <section class="activity-panel" aria-label="Upload activity">
-                <div class="panel-head">
-                    <h2>Transfer Activity</h2>
-                    <span>Server and chunk events will appear here.</span>
-                </div>
-                <ul id="activityLog" class="activity-log">
-                    <li>Waiting for file selection.</li>
+                <ul id="fileList" class="file-list">
+                    <li class="file-item file-item--empty">No files yet. Click + to add one.</li>
                 </ul>
-            </section> -->
+            </section>
         </section>
     </main>
 
