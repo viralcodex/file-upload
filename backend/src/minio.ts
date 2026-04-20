@@ -22,7 +22,6 @@ export const createMultipartUpload = async (objectKey: string, chunks: number, c
 
     const bucketName = await getOrCreateBucket();
     const uploadId = await minioClient.initiateNewMultipartUpload(bucketName, objectKey, { 'content-type': contentType });
-    console.log("UPLOAD", uploadId);
 
     const urls = await getPreSignedUrlsForChunks(objectKey, chunks, uploadId);
 
@@ -36,7 +35,6 @@ const getPreSignedUrlsForChunks = async (objectKey: string, chunks: number, uplo
 
     for (let i = 0; i < chunks; i++) {
         const url = await minioClient.presignedUrl("PUT", bucketName, objectKey, 1800, { uploadId, partNumber: `${i + 1}` }); // URL valid for 30 minutes
-        console.log(`Pre-signed URL for chunk ${i}: ${url}`);
         urls.push(url);
     }
 
@@ -68,6 +66,47 @@ export const abortFileUpload = async (objectKey: string, uploadId: string) => {
 
     return true;
 }
+
+export const deleteFileObjects = async (objectKeys: string[]) => {
+    const bucketName = await getOrCreateBucket();
+
+    try {
+        const errors = await minioClient.removeObjects(bucketName, objectKeys);
+        const response = Object.values(errors).map((value) => value?.Error);
+
+        return response;
+    } catch (e) {
+        throw new Error("Deletion from Object storage failed: " + e);
+    }
+}
+
+export const cleanupStaleIncompleteUploads = async (ageMs: number) => {
+    const bucketName = await getOrCreateBucket();
+    const cutOff = Date.now() - ageMs;
+    let keyMarker = "";
+    let uploadIdMarker = "";
+    let isTruncated = true;
+
+    while (isTruncated) {
+        const result = await minioClient.listIncompleteUploadsQuery(bucketName, "", keyMarker, uploadIdMarker, "");
+
+        const staleUploads = result.uploads.filter((upload) => upload.initiated.getTime() < cutOff);
+
+        for (const upload of staleUploads) {
+            try {
+                await minioClient.removeIncompleteUpload(bucketName, upload.key);
+                console.log(`Removed orphan multipart upload for ${upload.key}`);
+            } catch (e) {
+                console.error(`Failed to remove orphan multipart upload for ${upload.key}`, e);
+            }
+        }
+
+        isTruncated = result.isTruncated;
+        keyMarker = result.nextKeyMarker;
+        uploadIdMarker = result.nextUploadIdMarker;
+    }
+}
+
 
 const verifyUpload = async (bucketName: string, objectKey: string, uploadId: string, parts: { part: number; etag?: string | undefined; }[]) => {
     const uploadIdExists = await minioClient.findUploadId(bucketName, objectKey);

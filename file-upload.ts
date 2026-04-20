@@ -1,3 +1,8 @@
+type UploadedPart = {
+    part: number;
+    etag?: string;
+}
+
 export const uploadFileChunks = async (file: File, urls: string[]) => {
     const chunks: Blob[] = [];
     const chunkSize = Math.ceil(file.size / urls.length);
@@ -24,7 +29,7 @@ export const uploadFileChunks = async (file: File, urls: string[]) => {
 //retry with exponential backoff strategy
 const upload = async (chunk: Blob, url: string, chunkIndex: number) => {
     for (let retry = 0; retry < 5; retry++) {
-        const jitter = retry * Math.random() * 1000; // Random jitter to avoid thundering herd problem
+        const jitter = Math.random() * 1000; // Random jitter to avoid thundering herd problem
         const delay = Math.pow(2, retry) * 1000 + jitter; // Exponential backoff
         await new Promise(resolve => setTimeout(resolve, delay));
         try {
@@ -41,10 +46,11 @@ const upload = async (chunk: Blob, url: string, chunkIndex: number) => {
                 console.warn("Response failed for chunk: " + chunkIndex + " retrying " + (retry + 1) + " time");
                 continue;
             }
+
             return {
                 part: chunkIndex + 1,
-                etag: response.headers.get("Etag")
-            };
+                etag: response.headers.get("etag") ?? undefined,
+            } satisfies UploadedPart;
         } catch (e) {
             if (retry === 4) {
                 throw e;

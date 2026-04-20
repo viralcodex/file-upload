@@ -1,7 +1,7 @@
 import { createServer } from "http";
 import express from "express";
 import console from "console";
-import { startUploadSession, uploadAbortion, uploadCompletion } from "./src/files";
+import { markSelectedFilesForDeletion, getUploadedFiles, startUploadSession, uploadAbortion, uploadCompletion } from "./src/files";
 import { MAX_FIZE_SIZE } from "./src/constants";
 import dotenv from "dotenv";
 
@@ -36,7 +36,7 @@ app.post("/upload/init", async (req, res) => {
     if (fileSize > MAX_FIZE_SIZE) {
         return res.status(400).json({ error: "File size exceeds the maximum allowed limit of 1 GB" });
     }
-    if (!fileName || !fileSize || !contentType) {
+    if (fileName == null || fileSize == null || contentType == null) {
         return res.status(400).json({ error: "Missing required fields" });
     }
 
@@ -51,6 +51,13 @@ app.post("/upload/init", async (req, res) => {
 
 app.post("/upload/complete", async (req, res) => {
     const { uploadId, parts } = req.body;
+
+    if (!uploadId || !Array.isArray(parts) || parts.length === 0) {
+        return res.status(400).json({
+            status: "error",
+            reason: "uploadId and parts are required"
+        });
+    }
 
     try {
         const uploadRes = await uploadCompletion(uploadId, parts);
@@ -67,7 +74,12 @@ app.post("/upload/complete", async (req, res) => {
 
 app.post("/upload/abort", async (req, res) => {
     const { uploadId } = req.body;
-
+    if (!uploadId) {
+        return res.status(400).json({
+            status: "error",
+            reason: "uploadId is required"
+        });
+    }
     try {
         const abortRes = await uploadAbortion(uploadId);
         return res.json(abortRes);
@@ -78,14 +90,34 @@ app.post("/upload/abort", async (req, res) => {
             reason: error instanceof Error ? error.message : "Failed to abort upload"
         });
     }
+});
+
+app.get("/files", async (_, res) => {
+    const files = await getUploadedFiles();
+
+    return res.json(files);
+});
+
+app.post("/files/delete", async (req, res) => {
+    const { filesIds } = req.body;
+
+    if (!Array.isArray(filesIds) || filesIds.length === 0) {
+        return res.status(400).json({
+            status: "error",
+            reason: "filesIds must be a non-empty array"
+        });
+    }
+
+    try {
+        const result = await markSelectedFilesForDeletion(filesIds);
+        return res.json(result);
+    } catch (error) {
+        return res.status(500).json({
+            status: "error",
+            reason: error instanceof Error ? error.message : "Failed to mark files for deletion"
+        });
+    }
 })
-
-app.post("/upload/failed", async (req, res) => {
-    const { uploadId } = req.body;
-
-
-})
-
 const server = createServer(app);
 
 server.listen(PORT, () => {
