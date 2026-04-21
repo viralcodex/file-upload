@@ -1,6 +1,6 @@
 import { randomUUIDv7 } from "bun";
 import { MAX_CHUNK_SIZE } from "./constants";
-import { createMultipartUpload, abortFileUpload, completeUpload } from "./minio";
+import { createMultipartUpload, abortFileUpload, completeUpload, getUploadedParts, getPreSignedUrlsForParts } from "./minio";
 import { createUploadRecord, getFiles, getUploadByUploadId, markUploadForDeletion, markUploadAborted, markUploadCompleted, setErrorReason, setUploadsDeleted } from "./upload";
 import type { UploadRecord } from "./models/models";
 
@@ -42,6 +42,43 @@ export const startUploadSession = async (fileName: string, fileSize: number, con
 
         throw error;
     }
+}
+
+export const resumeUpload = async (uploadId: string, fileName: string, fileSize: number, contentType: string) => {
+    const uploadedRecord = ensureUploadExists(await getUploadByUploadId(uploadId), uploadId);
+
+    if (uploadedRecord.status !== "initiated") {
+        throw new Error("Cannot resume this upload.");
+    }
+
+    if (
+        uploadedRecord.original_file_name !== fileName ||
+        Number(uploadedRecord.file_size) !== fileSize ||
+        uploadedRecord.content_type !== contentType
+    ) {
+        throw new Error("Upload metadata does not match.");
+    }
+
+    const uploadedParts = await getUploadedParts(uploadedRecord.object_key, uploadId);
+
+    const uploadedPartNumbers = uploadedParts.map((part) => part.part);
+    
+    const missingPartNumbers = Array.from(
+        { length: Number(uploadedRecord.chunk_count) },
+        (_, index) => index + 1
+    ).filter((partNumber) => !uploadedPartNumbers.includes(partNumber));
+
+    const remainingParts = await getPreSignedUrlsForParts(
+        uploadedRecord.object_key,
+        uploadedRecord.upload_id,
+        missingPartNumbers
+    );
+
+    return {
+        uploadId: uploadedRecord.upload_id,
+        uploadedParts,
+        remainingParts,
+    };
 }
 
 

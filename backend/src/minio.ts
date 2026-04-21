@@ -1,6 +1,12 @@
 import { Client } from "minio";
 
-const minioClient = new Client({
+class MultipartAwareClient extends Client {
+    public async listUploadedParts(bucketName: string, objectName: string, uploadId: string) {
+        return this.listParts(bucketName, objectName, uploadId);
+    }
+}
+
+const minioClient = new MultipartAwareClient({
     endPoint: "localhost",
     port: 9000,
     useSSL: false,
@@ -18,16 +24,6 @@ const getOrCreateBucket = async () => {
     return "files";
 }
 
-export const createMultipartUpload = async (objectKey: string, chunks: number, contentType: string) => {
-
-    const bucketName = await getOrCreateBucket();
-    const uploadId = await minioClient.initiateNewMultipartUpload(bucketName, objectKey, { 'content-type': contentType });
-
-    const urls = await getPreSignedUrlsForChunks(objectKey, chunks, uploadId);
-
-    return { uploadId, urls };
-}
-
 const getPreSignedUrlsForChunks = async (objectKey: string, chunks: number, uploadId: string) => {
     const bucketName = await getOrCreateBucket();
 
@@ -39,6 +35,67 @@ const getPreSignedUrlsForChunks = async (objectKey: string, chunks: number, uplo
     }
 
     return urls;
+}
+
+const verifyUpload = async (bucketName: string, objectKey: string, uploadId: string, parts: { part: number; etag?: string | undefined; }[]) => {
+    const uploadIdExists = await minioClient.findUploadId(bucketName, objectKey);
+    if (!uploadIdExists || uploadId !== uploadIdExists) {
+        throw new Error("UploadId not found in minIO");
+    }
+
+    if (parts.length === 0) {
+        throw new Error("No parts found");
+    }
+
+    const sortedParts = [...parts].sort((a, b) => a.part - b.part);
+
+    for (let index = 0; index < sortedParts.length; index++) {
+        const part = sortedParts[index];
+        if (!part?.etag) {
+            throw new Error("Missing Etag for the part: " + part?.part);
+        }
+        if (part?.part !== index + 1) {
+            throw new Error("Invalid part for the file")
+        }
+    }
+}
+
+export const getUploadedParts = async (objectKey: string, uploadId: string) => {
+    const bucketName = await getOrCreateBucket();
+    const alreadyUploadedParts = await minioClient.listUploadedParts(bucketName, objectKey, uploadId);
+
+    return alreadyUploadedParts
+        .map((part) => ({
+            part: part.part,
+            etag: part.etag,
+        }))
+        .sort((a, b) => a.part - b.part);
+}
+
+export const getPreSignedUrlsForParts = async (objectKey: string, uploadId: string, parts: number[]) => {
+    const bucketName = await getOrCreateBucket();
+
+    const urls = await Promise.all(
+        parts.map(async (partNumber) => ({
+            part: partNumber,
+            url: await minioClient.presignedUrl("PUT", bucketName, objectKey, 1800, {
+                uploadId,
+                partNumber: String(partNumber),
+            }),
+        }))
+    );
+
+    return urls;
+}
+
+export const createMultipartUpload = async (objectKey: string, chunks: number, contentType: string) => {
+
+    const bucketName = await getOrCreateBucket();
+    const uploadId = await minioClient.initiateNewMultipartUpload(bucketName, objectKey, { 'content-type': contentType });
+
+    const urls = await getPreSignedUrlsForChunks(objectKey, chunks, uploadId);
+
+    return { uploadId, urls };
 }
 
 export const completeUpload = async (objectKey: string, uploadId: string, parts: { part: number; etag?: string | undefined; }[]) => {
@@ -104,29 +161,5 @@ export const cleanupStaleIncompleteUploads = async (ageMs: number) => {
         isTruncated = result.isTruncated;
         keyMarker = result.nextKeyMarker;
         uploadIdMarker = result.nextUploadIdMarker;
-    }
-}
-
-
-const verifyUpload = async (bucketName: string, objectKey: string, uploadId: string, parts: { part: number; etag?: string | undefined; }[]) => {
-    const uploadIdExists = await minioClient.findUploadId(bucketName, objectKey);
-    if (!uploadIdExists || uploadId !== uploadIdExists) {
-        throw new Error("UploadId not found in minIO");
-    }
-
-    if (parts.length === 0) {
-        throw new Error("No parts found");
-    }
-
-    const sortedParts = [...parts].sort((a, b) => a.part - b.part);
-
-    for (let index = 0; index < sortedParts.length; index++) {
-        const part = sortedParts[index];
-        if (!part?.etag) {
-            throw new Error("Missing Etag for the part: " + part?.part);
-        }
-        if (part?.part !== index + 1) {
-            throw new Error("Invalid part for the file")
-        }
     }
 }

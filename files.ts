@@ -1,20 +1,15 @@
 import { uploadFileChunks } from "./file-upload";
+import { DeleteFilesResponse, ErrorResponse, FileEntry, ResumeUploadResponse, ServerFileEntry, UploadedPart } from './models.ts';
 
 const BASE_URL = "http://localhost:8080";
-
-export interface FileEntry {
-    id: string;
-    fileName: string;
-    fileSize: number;
-    contentType: string;
-    status: "uploading" | "complete" | "error";
-    statusText: string;
-    uploadId?: string;
-    selected: boolean;
-}
-
+const RETRYABLE_UPLOAD_STATUS = "Upload paused. Retrying when connection returns.";
+const TERMINAL_RESUME_REASONS = new Set([
+    "Cannot resume this upload.",
+    "Upload metadata does not match.",
+]);
 const files: FileEntry[] = [];
 let idCounter = 0;
+const uploadFiles = new Map<string, File>();
 
 const fileListEl = document.getElementById("fileList") as HTMLUListElement | null;
 
@@ -72,11 +67,121 @@ const updateEntry = (id: string, updates: Partial<FileEntry>) => {
     renderFileList();
 };
 
-type DeleteFilesResponse = {
-    status: "ok" | "partial";
-    markedIds: string[];
-    skippedIds: string[];
+const postJson = async <T>(path: string, body: unknown) => {
+    const response = await fetch(`${BASE_URL}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+
+    const data: T & ErrorResponse = await response.json();
+
+    if (!response.ok || data.error || (data.status === "error" && data.reason)) {
+        throw new Error(data.reason || data.error || `Request failed with status ${response.status}`);
+    }
+
+    return data;
 };
+
+const hasCompletedUpload = async (uploadId: string) => {
+    const response = await fetch(`${BASE_URL}/files`);
+
+    if (!response.ok) {
+        throw new Error(`Failed to verify upload status (${response.status})`);
+    }
+
+    const serverFiles: { file_id: string }[] = await response.json();
+    return serverFiles.some((file) => file.file_id === uploadId);
+};
+
+const completeUpload = async (uploadId: string, fileName: string, parts: UploadedPart[]) => {
+    try {
+        const data = await postJson<{ status: string }>("/upload/complete", {
+            fileName,
+            parts,
+            uploadId,
+        });
+
+        if (data.status !== "complete") {
+            throw new Error("Upload failed");
+        }
+    } catch (error) {
+        if (await hasCompletedUpload(uploadId)) {
+            return;
+        }
+
+        throw error;
+    }
+};
+
+const isTerminalResumeError = (error: unknown) => {
+    const message = error instanceof Error ? error.message : "Upload failed";
+
+    return (
+        message.startsWith("No uploads found for ID:") ||
+        TERMINAL_RESUME_REASONS.has(message)
+    );
+};
+
+const tryResumeUpload = async (entryId: string) => {
+    const entry = files.find((file) => file.id === entryId);
+    const file = uploadFiles.get(entryId);
+
+    if (!entry?.uploadId || !file) {
+        return;
+    }
+
+    try {
+        if (await hasCompletedUpload(entry.uploadId)) {
+            updateEntry(entryId, { status: "complete", statusText: "Uploaded" });
+            uploadFiles.delete(entryId);
+            return;
+        }
+
+        updateEntry(entryId, { status: "uploading", statusText: "Resuming upload…" });
+
+        const { uploadedParts, remainingParts } = await postJson<ResumeUploadResponse>("/upload/resume", {
+            uploadId: entry.uploadId,
+            fileName: file.name,
+            fileSize: file.size,
+            contentType: file.type,
+        });
+        const totalChunks = uploadedParts.length + remainingParts.length;
+        const resumedParts = remainingParts.length === 0
+            ? []
+            : await uploadFileChunks(
+                file,
+                remainingParts.map((part) => part.url),
+                remainingParts.map((part) => part.part),
+                totalChunks,
+            );
+        const allParts = [...uploadedParts, ...resumedParts].sort((a, b) => a.part - b.part);
+
+        updateEntry(entryId, { statusText: "Completing…" });
+        await completeUpload(entry.uploadId, file.name, allParts);
+        updateEntry(entryId, { status: "complete", statusText: "Uploaded" });
+        uploadFiles.delete(entryId);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : "Upload failed";
+
+        if (isTerminalResumeError(error)) {
+            updateEntry(entryId, { status: "error", statusText: message });
+            uploadFiles.delete(entryId);
+            return;
+        }
+
+        updateEntry(entryId, { status: "error", statusText: RETRYABLE_UPLOAD_STATUS });
+    }
+};
+
+window.addEventListener("online", () => {
+    files
+        .filter((file) => file.uploadId && file.status === "error" && file.statusText === RETRYABLE_UPLOAD_STATUS)
+        .forEach((file) => {
+            void tryResumeUpload(file.id);
+        });
+});
+
 
 export const addFileAndUpload = async (file: File) => {
     const id = String(++idCounter);
@@ -90,26 +195,15 @@ export const addFileAndUpload = async (file: File) => {
         selected: false,
     };
     files.push(entry);
+    uploadFiles.set(id, file);
     renderFileList();
 
     try {
-        const responseInit = await fetch(`${BASE_URL}/upload/init`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                fileName: file.name,
-                fileSize: file.size,
-                contentType: file.type,
-            }),
+        const data = await postJson<{ uploadId: string; urls: string[] }>("/upload/init", {
+            fileName: file.name,
+            fileSize: file.size,
+            contentType: file.type,
         });
-
-        if (!responseInit.ok) {
-            const errorText = await responseInit.text();
-            updateEntry(id, { status: "error", statusText: errorText || `Init failed (${responseInit.status})` });
-            return;
-        }
-
-        const data = await responseInit.json();
         entry.uploadId = data.uploadId;
 
         const preSignedUrls: string[] = data.urls;
@@ -124,39 +218,19 @@ export const addFileAndUpload = async (file: File) => {
 
         updateEntry(id, { statusText: "Completing…" });
 
-        const responseComplete = await fetch(`${BASE_URL}/upload/complete`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                fileName: file.name,
-                parts,
-                uploadId: data.uploadId,
-            }),
-        });
+        await completeUpload(data.uploadId, file.name, parts);
 
-        if (!responseComplete.ok) {
-            updateEntry(id, { status: "error", statusText: "Complete request failed" });
+        updateEntry(id, { status: "complete", statusText: "Uploaded" });
+        uploadFiles.delete(id);
+
+    } catch (e: any) {
+        if (entry.uploadId) {
+            await tryResumeUpload(id);
             return;
         }
 
-        const responseData = await responseComplete.json();
-
-        if (responseData.status === "complete") {
-            updateEntry(id, { status: "complete", statusText: "Uploaded" });
-        } else {
-            updateEntry(id, { status: "error", statusText: responseData.reason || "Upload failed" });
-        }
-    } catch (e: any) {
         updateEntry(id, { status: "error", statusText: e.message || "Upload failed" });
-        if (entry.uploadId) {
-            try {
-                await fetch(`${BASE_URL}/upload/abort`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ fileName: file.name, uploadId: entry.uploadId }),
-                });
-            } catch {}
-        }
+        uploadFiles.delete(id);
     }
 };
 
@@ -181,19 +255,7 @@ renderFileList();
 
 export const markFilesForDeletion = async (fileIds: string[]): Promise<DeleteFilesResponse> => {
     try {
-        const response = await fetch(`${BASE_URL}/files/delete`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({ filesIds: fileIds })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok || data.error || data.reason) {
-            throw new Error(data.reason || data.error || `Delete failed with status ${response.status}`);
-        }
+        const data = await postJson<DeleteFilesResponse>("/files/delete", { filesIds: fileIds });
 
         return {
             status: data.status,
@@ -210,10 +272,11 @@ export const fetchFiles = async () => {
         const res = await fetch(`${BASE_URL}/files`);
         if (!res.ok) return;
 
-        const serverFiles: { file_id: string; original_file_name: string; content_type: string; file_size: string; status: string; created_at: string }[] = await res.json();
+        const serverFiles: ServerFileEntry[] = await res.json();
+        const serverIds = new Set(serverFiles.map((file) => file.file_id));
 
-        // keep in-progress local uploads, replace the rest with server data
-        const uploading = files.filter((f) => f.status === "uploading");
+        // keep local uploads that are still pending and not already finalized on the server
+        const pendingLocalFiles = files.filter((f) => f.status !== "complete" && (!f.uploadId || !serverIds.has(f.uploadId)));
         files.length = 0;
 
         for (const sf of serverFiles) {
@@ -229,7 +292,7 @@ export const fetchFiles = async () => {
             });
         }
 
-        files.push(...uploading);
+        files.push(...pendingLocalFiles);
         renderFileList();
     } catch (e) {
         console.error("Failed to fetch files", e);

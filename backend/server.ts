@@ -1,7 +1,7 @@
 import { createServer } from "http";
 import express from "express";
 import console from "console";
-import { markSelectedFilesForDeletion, getUploadedFiles, startUploadSession, uploadAbortion, uploadCompletion } from "./src/files";
+import { markSelectedFilesForDeletion, getUploadedFiles, startUploadSession, uploadAbortion, uploadCompletion, resumeUpload } from "./src/files";
 import { MAX_FIZE_SIZE } from "./src/constants";
 import dotenv from "dotenv";
 
@@ -33,8 +33,8 @@ app.get("/", (req, res) => {
 app.post("/upload/init", async (req, res) => {
     const { fileName, fileSize, contentType } = req.body;
 
-    if (fileSize > MAX_FIZE_SIZE) {
-        return res.status(400).json({ error: "File size exceeds the maximum allowed limit of 1 GB" });
+    if (fileSize > MAX_FIZE_SIZE || fileSize < 0) {
+        return res.status(400).json({ error: "Invalid File Size" });
     }
     if (fileName == null || fileSize == null || contentType == null) {
         return res.status(400).json({ error: "Missing required fields" });
@@ -46,6 +46,42 @@ app.post("/upload/init", async (req, res) => {
     } catch (error) {
         console.error("Failed to initialize upload", error);
         return res.status(500).json({ error: "Failed to initialize upload" });
+    }
+});
+
+app.post("/upload/resume", async (req, res) => {
+    const { uploadId, fileName, fileSize, contentType } = req.body;
+
+    if (fileSize > MAX_FIZE_SIZE || fileSize < 0) {
+        return res.status(400).json({ error: "Invalid File Size" });
+    }
+    if (uploadId == null || fileName == null || fileSize == null || contentType == null) {
+        return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    try {
+        const response = await resumeUpload(uploadId, fileName, fileSize, contentType);
+        return res.json(response);
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : "Failed to resume upload";
+        
+        if (reason.startsWith("No uploads found for ID:")) {
+            return res.status(404).json({
+                status: "error",
+                reason,
+            });
+        }
+        if (reason === "Cannot resume this upload." || reason === "Upload metadata does not match.") {
+            return res.status(409).json({
+                status: "error",
+                reason,
+            });
+        }
+
+        return res.status(500).json({
+            status: "error",
+            reason,
+        });
     }
 });
 
@@ -70,7 +106,6 @@ app.post("/upload/complete", async (req, res) => {
         });
     }
 })
-
 
 app.post("/upload/abort", async (req, res) => {
     const { uploadId } = req.body;
@@ -118,6 +153,7 @@ app.post("/files/delete", async (req, res) => {
         });
     }
 })
+
 const server = createServer(app);
 
 server.listen(PORT, () => {
