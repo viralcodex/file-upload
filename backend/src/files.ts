@@ -1,7 +1,7 @@
 import { randomUUIDv7 } from "bun";
 import { MAX_CHUNK_SIZE } from "./constants";
 import { createMultipartUpload, abortFileUpload, completeUpload, getUploadedParts, getPreSignedUrlsForParts } from "./minio";
-import { createUploadRecord, getFiles, getUploadByUploadId, markUploadForDeletion, markUploadAborted, markUploadCompleted, setErrorReason, setUploadsDeleted } from "./upload";
+import { createUploadRecord, getFilesByUserId, getUploadByUploadAndUserId, markUploadForDeletion, markUploadAborted, markUploadCompleted, setErrorReason } from "./upload";
 import type { UploadRecord } from "./models/models";
 
 const getChunksForFile = (fileSize: number) => {
@@ -9,7 +9,7 @@ const getChunksForFile = (fileSize: number) => {
 }
 
 //add postgresql validations and additions as well
-export const startUploadSession = async (fileName: string, fileSize: number, contentType: string) => {
+export const startUploadSession = async (userId: string, fileName: string, fileSize: number, contentType: string) => {
     const chunks = getChunksForFile(fileSize);
 
     const objectKey = getObjectKey(fileName);
@@ -19,12 +19,13 @@ export const startUploadSession = async (fileName: string, fileSize: number, con
 
     try {
         const row = await createUploadRecord(
+            userId,
             session.uploadId,
             objectKey,
             fileName,
             contentType,
             fileSize,
-            chunks
+            chunks,
         );
 
         console.log("ROW START:", row);
@@ -44,8 +45,8 @@ export const startUploadSession = async (fileName: string, fileSize: number, con
     }
 }
 
-export const resumeUpload = async (uploadId: string, fileName: string, fileSize: number, contentType: string) => {
-    const uploadedRecord = ensureUploadExists(await getUploadByUploadId(uploadId), uploadId);
+export const resumeUpload = async (userId: string, uploadId: string, fileName: string, fileSize: number, contentType: string) => {
+    const uploadedRecord = ensureUploadExists(await getUploadByUploadAndUserId(userId, uploadId), uploadId);
 
     if (uploadedRecord.status !== "initiated") {
         throw new Error("Cannot resume this upload.");
@@ -82,10 +83,10 @@ export const resumeUpload = async (uploadId: string, fileName: string, fileSize:
 }
 
 
-export const uploadCompletion = async (uploadId: string, parts: { part: number; etag?: string | undefined; }[]) => {
+export const uploadCompletion = async (userId: string, uploadId: string, parts: { part: number; etag?: string | undefined; }[]) => {
 
     //fetch data from SQL to verify record then send for verification on minio side
-    const uploadedRecord = ensureUploadExists(await getUploadByUploadId(uploadId), uploadId);
+    const uploadedRecord = ensureUploadExists(await getUploadByUploadAndUserId(userId, uploadId), uploadId);
 
     if (uploadedRecord.status !== "initiated") {
         throw new Error("Cannot complete this upload.");
@@ -97,7 +98,7 @@ export const uploadCompletion = async (uploadId: string, parts: { part: number; 
         throw new Error("File upload was corrupted or didn't complete. Please try again.");
     }
 
-    const row = await markUploadCompleted(uploadId, result.objectInfo.etag);
+    const row = await markUploadCompleted(userId, uploadId, result.objectInfo.etag);
     
     console.log("ROW COMPLETE: ", row);
     if (!row) {
@@ -111,9 +112,9 @@ export const uploadCompletion = async (uploadId: string, parts: { part: number; 
     }
 }
 
-export const uploadAbortion = async (uploadId: string) => {
+export const uploadAbortion = async (userId: string, uploadId: string) => {
 
-    const uploadedRecord = ensureUploadExists(await getUploadByUploadId(uploadId), uploadId);
+    const uploadedRecord = ensureUploadExists(await getUploadByUploadAndUserId(userId, uploadId), uploadId);
     
     if (uploadedRecord.status === "aborted") {
         return { status: "aborted", uploadId };
@@ -126,12 +127,12 @@ export const uploadAbortion = async (uploadId: string) => {
     const result = await abortFileUpload(uploadedRecord.object_key, uploadId);
 
     if (!result) {
-        await setErrorReason(uploadId, "Failed to abort upload in storage. Please retry.");
+        await setErrorReason(userId, uploadId, "Failed to abort upload in storage. Please retry.");
         throw new Error("Failed to abort upload in storage. Please retry.");
 
     }
 
-    const row = await markUploadAborted(uploadId, uploadedRecord.object_key);
+    const row = await markUploadAborted(userId, uploadId);
 
     console.log("ROW ABORT: ", row);
     if (!row)
@@ -143,14 +144,14 @@ export const uploadAbortion = async (uploadId: string) => {
     }
 }
 
-export const getUploadedFiles = async () => {
-    const files = await getFiles();
+export const getUploadedFiles = async (userId: string) => {
+    const files = await getFilesByUserId(userId);
     return files;
 }
 
-export const markSelectedFilesForDeletion = async (fileIds: string[]) => {
+export const markSelectedFilesForDeletion = async (userId: string, fileIds: string[]) => {
     
-    const updatedRows = await markUploadForDeletion(fileIds);
+    const updatedRows = await markUploadForDeletion(userId, fileIds);
 
     const markedIds = updatedRows.map(row => row.upload_id);
 
