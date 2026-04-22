@@ -4,6 +4,7 @@ import console from "console";
 import { markSelectedFilesForDeletion, getUploadedFiles, startUploadSession, uploadAbortion, uploadCompletion, resumeUpload } from "./src/files";
 import { MAX_FIZE_SIZE } from "./src/constants";
 import dotenv from "dotenv";
+import { getOrCreateUserId } from "./src/user";
 
 dotenv.config();
 
@@ -26,22 +27,32 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.get("/", (req, res) => {
+app.get("/", (_, res) => {
     res.json({ message: "Hello from the Upload server!" });
 });
 
+app.post("/users", async (req, res) => {
+    try {
+        const userId = await getOrCreateUserId();
+        return res.json({ userId });
+    } catch (error) {
+        console.error("Failed to create user", error);
+        return res.status(500).json({ error: "Failed to create user" });
+    }
+});
+
 app.post("/upload/init", async (req, res) => {
-    const { fileName, fileSize, contentType } = req.body;
+    const { userId, fileName, fileSize, contentType } = req.body;
 
     if (fileSize > MAX_FIZE_SIZE || fileSize < 0) {
         return res.status(400).json({ error: "Invalid File Size" });
     }
-    if (fileName == null || fileSize == null || contentType == null) {
+    if (userId == null || fileName == null || fileSize == null || contentType == null) {
         return res.status(400).json({ error: "Missing required fields" });
     }
 
     try {
-        const session = await startUploadSession(fileName, fileSize, contentType);
+        const session = await startUploadSession(userId, fileName, fileSize, contentType);
         return res.json(session);
     } catch (error) {
         console.error("Failed to initialize upload", error);
@@ -50,21 +61,21 @@ app.post("/upload/init", async (req, res) => {
 });
 
 app.post("/upload/resume", async (req, res) => {
-    const { uploadId, fileName, fileSize, contentType } = req.body;
+    const { userId, uploadId, fileName, fileSize, contentType } = req.body;
 
     if (fileSize > MAX_FIZE_SIZE || fileSize < 0) {
         return res.status(400).json({ error: "Invalid File Size" });
     }
-    if (uploadId == null || fileName == null || fileSize == null || contentType == null) {
+    if (userId == null || uploadId == null || fileName == null || fileSize == null || contentType == null) {
         return res.status(400).json({ error: "Missing required fields" });
     }
 
     try {
-        const response = await resumeUpload(uploadId, fileName, fileSize, contentType);
+        const response = await resumeUpload(userId, uploadId, fileName, fileSize, contentType);
         return res.json(response);
     } catch (error) {
         const reason = error instanceof Error ? error.message : "Failed to resume upload";
-        
+
         if (reason.startsWith("No uploads found for ID:")) {
             return res.status(404).json({
                 status: "error",
@@ -86,17 +97,17 @@ app.post("/upload/resume", async (req, res) => {
 });
 
 app.post("/upload/complete", async (req, res) => {
-    const { uploadId, parts } = req.body;
+    const { userId, uploadId, parts } = req.body;
 
-    if (!uploadId || !Array.isArray(parts) || parts.length === 0) {
+    if (!userId || !uploadId || !Array.isArray(parts) || parts.length === 0) {
         return res.status(400).json({
             status: "error",
-            reason: "uploadId and parts are required"
+            reason: "userId, uploadId and parts are required"
         });
     }
 
     try {
-        const uploadRes = await uploadCompletion(uploadId, parts);
+        const uploadRes = await uploadCompletion(userId, uploadId, parts);
         return res.json(uploadRes);
     } catch (error) {
         console.error("Failed to complete upload", error);
@@ -108,15 +119,17 @@ app.post("/upload/complete", async (req, res) => {
 })
 
 app.post("/upload/abort", async (req, res) => {
-    const { uploadId } = req.body;
-    if (!uploadId) {
+    const { userId, uploadId } = req.body;
+
+    if (!uploadId || !userId) {
         return res.status(400).json({
             status: "error",
             reason: "uploadId is required"
         });
     }
+
     try {
-        const abortRes = await uploadAbortion(uploadId);
+        const abortRes = await uploadAbortion(userId, uploadId);
         return res.json(abortRes);
     } catch (error) {
         console.error("Failed to abort upload", error);
@@ -127,14 +140,29 @@ app.post("/upload/abort", async (req, res) => {
     }
 });
 
-app.get("/files", async (_, res) => {
-    const files = await getUploadedFiles();
+app.get("/files", async (req, res) => {
+    const userId = req.query.userId as string | undefined;
+    if(userId == null)
+    {
+        return res.status(400).json({
+            status: "error",
+            reason: "missing userId"
+        });
+    }
+    const files = await getUploadedFiles(userId);
 
     return res.json(files);
 });
 
 app.post("/files/delete", async (req, res) => {
-    const { filesIds } = req.body;
+    const { userId, filesIds } = req.body;
+
+    if (userId == null) {
+        return res.status(400).json({
+            status: "error",
+            reason: "missing userId"
+        });
+    }
 
     if (!Array.isArray(filesIds) || filesIds.length === 0) {
         return res.status(400).json({
@@ -144,7 +172,7 @@ app.post("/files/delete", async (req, res) => {
     }
 
     try {
-        const result = await markSelectedFilesForDeletion(filesIds);
+        const result = await markSelectedFilesForDeletion(userId, filesIds);
         return res.json(result);
     } catch (error) {
         return res.status(500).json({

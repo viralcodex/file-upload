@@ -1,4 +1,5 @@
 export interface UploadRecord {
+  user_id: string;
   upload_id: string;
   object_key: string;
   original_file_name: string;
