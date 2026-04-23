@@ -201,6 +201,11 @@ h1 {
     border-color: rgba(13, 122, 102, 0.3);
 }
 
+.file-item--paused {
+    border-color: rgba(190, 126, 12, 0.35);
+    background: rgba(255, 246, 220, 0.72);
+}
+
 .file-item--error {
     border-color: rgba(200, 50, 50, 0.3);
 }
@@ -229,6 +234,7 @@ h1 {
 
 .file-item-info {
     min-width: 0;
+    flex: 1;
 }
 
 .file-item-name {
@@ -245,6 +251,23 @@ h1 {
     font-size: 0.84rem;
 }
 
+.file-action-btn {
+    border: 1px solid rgba(29, 48, 63, 0.12);
+    border-radius: 999px;
+    padding: 6px 12px;
+    background: rgba(255, 255, 255, 0.82);
+    color: var(--text-main);
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.file-action-btn:hover {
+    background: rgba(255, 255, 255, 1);
+}
+
 .file-item-status {
     font-weight: 600;
 }
@@ -255,6 +278,10 @@ h1 {
 
 .file-item-status--complete {
     color: #1a8a3e;
+}
+
+.file-item-status--paused {
+    color: #9a6a09;
 }
 
 .file-item-status--error {

@@ -1,3 +1,5 @@
+export type UploadStatus = "uploading" | "paused" | "complete" | "error";
+
 export interface DeleteFilesResponse {
     status: "ok" | "partial";
     markedIds: string[];
@@ -9,7 +11,7 @@ export interface FileEntry {
     fileName: string;
     fileSize: number;
     contentType: string;
-    status: "uploading" | "complete" | "error";
+    status: UploadStatus;
     statusText: string;
     uploadId?: string;
     selected: boolean;
