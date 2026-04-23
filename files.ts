@@ -1,20 +1,12 @@
 import { uploadFileChunks } from "./file-upload";
-import { ServerFileEntry } from "./models";
+import { DeleteFilesResponse, ErrorResponse, FileEntry, ResumeUploadResponse, ServerFileEntry, UploadedPart } from "./models";
 
 const BASE_URL = "http://localhost:8080";
 
-export interface FileEntry {
-    id: string;
-    fileName: string;
-    fileSize: number;
-    contentType: string;
-    status: "uploading" | "complete" | "error";
-    statusText: string;
-    uploadId?: string;
-    selected: boolean;
-}
-
 const files: FileEntry[] = [];
+const uploadFiles = new Map<string, File>();
+const uploadControllers = new Map<string, AbortController>();
+const pauseRequests = new Set<string>();
 let idCounter = 0;
 
 const fileListEl = document.getElementById("fileList") as HTMLUListElement | null;
@@ -27,6 +19,127 @@ const formatSize = (bytes: number): string => {
 };
 
 const getUserId = () => localStorage.getItem("user_id");
+
+const requireUserId = () => {
+    const userId = getUserId();
+
+    if (!userId) {
+        throw new Error("Register a user first");
+    }
+
+    return userId;
+};
+
+const isPausedError = (error: unknown) => error instanceof DOMException && error.name === "AbortError";
+
+const getActionLabel = (entry: FileEntry) => {
+    if (entry.status === "paused") return "Resume";
+    if (entry.status === "uploading" && entry.uploadId) return "Pause";
+    return null;
+};
+
+const sortParts = (parts: UploadedPart[]) => [...parts].sort((left, right) => left.part - right.part);
+
+const clearUploadState = (entryId: string, removeFile: boolean = false) => {
+    uploadControllers.delete(entryId);
+    pauseRequests.delete(entryId);
+
+    const entry = files.find((item) => item.id === entryId);
+    if (removeFile || entry?.status === "complete" || entry?.status === "error") {
+        uploadFiles.delete(entryId);
+    }
+};
+
+const pauseUpload = (entryId: string) => {
+    pauseRequests.add(entryId);
+    uploadControllers.get(entryId)?.abort();
+    updateEntry(entryId, { status: "paused", statusText: "Paused" });
+};
+
+const completeUpload = async (entryId: string, uploadId: string, parts: UploadedPart[]) => {
+    updateEntry(entryId, { statusText: "Completing…" });
+
+    const responseComplete = await fetch(`${BASE_URL}/upload/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            userId: requireUserId(),
+            parts: sortParts(parts),
+            uploadId,
+        }),
+    });
+
+    if (!responseComplete.ok) {
+        const error = await responseComplete.json() as ErrorResponse;
+        throw new Error(error.reason || error.error || "Complete request failed");
+    }
+
+    const responseData = await responseComplete.json() as { status: string; reason?: string };
+
+    if (responseData.status !== "complete") {
+        throw new Error(responseData.reason || "Upload failed");
+    }
+
+    clearUploadState(entryId);
+    updateEntry(entryId, { status: "complete", statusText: "Uploaded" });
+};
+
+const resumeFileUpload = async (entryId: string) => {
+    const entry = files.find((item) => item.id === entryId);
+    const file = uploadFiles.get(entryId);
+
+    if (!entry || !file || !entry.uploadId) {
+        updateEntry(entryId, { status: "error", statusText: "Cannot resume this upload" });
+        return;
+    }
+
+    const controller = new AbortController();
+    uploadControllers.set(entryId, controller);
+    pauseRequests.delete(entryId);
+    updateEntry(entryId, { status: "uploading", statusText: "Resuming…" });
+
+    try {
+        const resumeResponse = await fetch(`${BASE_URL}/upload/resume`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                userId: requireUserId(),
+                uploadId: entry.uploadId,
+                fileName: file.name,
+                fileSize: file.size,
+                contentType: file.type,
+            }),
+        });
+
+        if (!resumeResponse.ok) {
+            const error = await resumeResponse.json() as ErrorResponse;
+            throw new Error(error.reason || error.error || "Resume request failed");
+        }
+
+        const resumeData = await resumeResponse.json() as ResumeUploadResponse;
+        const remainingUrls = resumeData.remainingParts.map((part) => part.url);
+        const remainingPartNumbers = resumeData.remainingParts.map((part) => part.part);
+        const uploadedParts = resumeData.uploadedParts;
+
+        const remainingUploadedParts = remainingUrls.length > 0
+            ? await uploadFileChunks(file, remainingUrls, remainingPartNumbers, uploadedParts.length + remainingUrls.length, controller.signal)
+            : [];
+
+        await completeUpload(entryId, entry.uploadId, [...uploadedParts, ...remainingUploadedParts]);
+    } catch (error) {
+        if (isPausedError(error) || pauseRequests.has(entryId)) {
+            uploadControllers.delete(entryId);
+            updateEntry(entryId, { status: "paused", statusText: "Paused" });
+            return;
+        }
+
+        clearUploadState(entryId);
+        updateEntry(entryId, {
+            status: "error",
+            statusText: error instanceof Error ? error.message : "Resume failed",
+        });
+    }
+};
 
 export const registerUser = async (): Promise<string | null> => {
     const existing = localStorage.getItem("user_id");
@@ -54,7 +167,7 @@ const renderFileList = () => {
     fileListEl.innerHTML = files
         .map(
             (f) => `
-            <li class="file-item ${f.status === 'uploading' ? 'file-item--uploading' : ''} ${f.status === 'error' ? 'file-item--error' : ''} ${f.selected ? 'file-item--selected' : ''}" data-id="${f.id}">
+            <li class="file-item ${f.status === 'uploading' ? 'file-item--uploading' : ''} ${f.status === 'paused' ? 'file-item--paused' : ''} ${f.status === 'error' ? 'file-item--error' : ''} ${f.selected ? 'file-item--selected' : ''}" data-id="${f.id}">
                 <div class="file-item-row">
                     <input type="checkbox" class="file-checkbox" data-id="${f.id}" ${f.selected ? 'checked' : ''}>
                     <div class="file-item-info">
@@ -64,6 +177,7 @@ const renderFileList = () => {
                             <span class="file-item-status file-item-status--${f.status}">${f.statusText}</span>
                         </div>
                     </div>
+                    ${getActionLabel(f) ? `<button type="button" class="file-action-btn" data-action="toggle-upload" data-id="${f.id}">${getActionLabel(f)}</button>` : ""}
                 </div>
             </li>`
         )
@@ -76,6 +190,22 @@ const renderFileList = () => {
             if (entry) {
                 entry.selected = cb.checked;
                 renderFileList();
+            }
+        });
+    });
+
+    fileListEl.querySelectorAll<HTMLButtonElement>(".file-action-btn").forEach((button) => {
+        button.addEventListener("click", async () => {
+            const entry = files.find((item) => item.id === button.dataset.id);
+            if (!entry) return;
+
+            if (entry.status === "paused") {
+                await resumeFileUpload(entry.id);
+                return;
+            }
+
+            if (entry.status === "uploading") {
+                pauseUpload(entry.id);
             }
         });
     });
@@ -99,6 +229,9 @@ export const addFileAndUpload = async (file: File) => {
         selected: false,
     };
     files.push(entry);
+
+    uploadFiles.set(id, file);
+
     renderFileList();
 
     try {
@@ -106,7 +239,7 @@ export const addFileAndUpload = async (file: File) => {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                userId: getUserId(),
+                userId: requireUserId(),
                 fileName: file.name,
                 fileSize: file.size,
                 contentType: file.type,
@@ -116,6 +249,7 @@ export const addFileAndUpload = async (file: File) => {
         if (!responseInit.ok) {
             const errorText = await responseInit.text();
             updateEntry(id, { status: "error", statusText: errorText || `Init failed (${responseInit.status})` });
+            clearUploadState(id, true);
             return;
         }
 
@@ -125,48 +259,36 @@ export const addFileAndUpload = async (file: File) => {
         const preSignedUrls: string[] = data.urls;
         if (!preSignedUrls || preSignedUrls.length === 0) {
             updateEntry(id, { status: "error", statusText: "No pre-signed URLs received" });
+            clearUploadState(id, true);
             return;
         }
+
+        const controller = new AbortController();
+        uploadControllers.set(id, controller);
+        pauseRequests.delete(id);
 
         updateEntry(id, { statusText: "Uploading chunks…" });
 
-        const parts = await uploadFileChunks(file, preSignedUrls);
-
-        updateEntry(id, { statusText: "Completing…" });
-
-        const responseComplete = await fetch(`${BASE_URL}/upload/complete`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                userId: getUserId(),
-                parts,
-                uploadId: data.uploadId,
-            }),
-        });
-
-        if (!responseComplete.ok) {
-            updateEntry(id, { status: "error", statusText: "Complete request failed" });
+        const parts = await uploadFileChunks(file, preSignedUrls, undefined, preSignedUrls.length, controller.signal);
+        await completeUpload(id, data.uploadId, parts);
+    } catch (e: unknown) {
+        if (isPausedError(e) || pauseRequests.has(id)) {
+            uploadControllers.delete(id);
+            updateEntry(id, { status: "paused", statusText: "Paused" });
             return;
         }
 
-        const responseData = await responseComplete.json();
-
-        if (responseData.status === "complete") {
-            updateEntry(id, { status: "complete", statusText: "Uploaded" });
-        } else {
-            updateEntry(id, { status: "error", statusText: responseData.reason || "Upload failed" });
-        }
-    } catch (e: any) {
-        updateEntry(id, { status: "error", statusText: e.message || "Upload failed" });
+        updateEntry(id, { status: "error", statusText: e instanceof Error ? e.message : "Upload failed" });
         if (entry.uploadId) {
             try {
                 await fetch(`${BASE_URL}/upload/abort`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ userId: getUserId(), uploadId: entry.uploadId }),
+                    body: JSON.stringify({ userId: requireUserId(), uploadId: entry.uploadId }),
                 });
             } catch {}
         }
+        clearUploadState(id, true);
     }
 };
 
@@ -174,35 +296,44 @@ export const deleteSelected = async () => {
     const selected = files.filter((f) => f.selected);
     if (selected.length === 0) return;
 
-    const filesIds = selected.map((f) => f.uploadId).filter(Boolean);
+    const filesIds = selected.flatMap((f) => f.uploadId ? [f.uploadId] : []);
 
-    try {
-        const res = await fetch(`${BASE_URL}/files/delete`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ userId: getUserId(), filesIds }),
-        });
-        if (!res.ok) return;
-    } catch { }
+    if (filesIds.length > 0) {
+        try {
+            const res = await fetch(`${BASE_URL}/files/delete`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ userId: requireUserId(), filesIds }),
+            });
+
+            if (!res.ok) {
+                return;
+            }
+
+            await res.json() as DeleteFilesResponse;
+        } catch {
+            return;
+        }
+    }
 
     const remaining = files.filter((f) => !f.selected);
+    for (const entry of files.filter((f) => f.selected)) {
+        clearUploadState(entry.id, true);
+    }
     files.length = 0;
     files.push(...remaining);
     renderFileList();
 };
 
-// Initial render
-renderFileList();
-
 export const fetchFiles = async () => {
     try {
-        const res = await fetch(`${BASE_URL}/files?userId=${getUserId()}`);
+        const res = await fetch(`${BASE_URL}/files?userId=${encodeURIComponent(requireUserId())}`);
         if (!res.ok) return;
 
         const serverFiles: ServerFileEntry[] = await res.json();
 
-        // keep in-progress local uploads, replace the rest with server data
-        const uploading = files.filter((f) => f.status === "uploading");
+        // keep local in-progress uploads, replace completed server-backed entries
+        const pendingLocalEntries = files.filter((f) => f.status === "uploading" || f.status === "paused");
         files.length = 0;
 
         for (const sf of serverFiles) {
@@ -218,9 +349,11 @@ export const fetchFiles = async () => {
             });
         }
 
-        files.push(...uploading);
+        files.push(...pendingLocalEntries);
         renderFileList();
     } catch (e) {
         console.error("Failed to fetch files", e);
     }
 };
+
+renderFileList();
