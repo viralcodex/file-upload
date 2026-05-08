@@ -40,6 +40,11 @@ export interface ErrorResponse {
     status?: string;
 };
 
+export interface DownloadFileResponse {
+    url: string;
+    fileName: string;
+};
+
 export interface ServerFileEntry {
     file_id: FileEntry["id"];
     original_file_name: FileEntry["fileName"];

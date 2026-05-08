@@ -1,5 +1,5 @@
 import { uploadFileChunks } from "./file-upload";
-import { DeleteFilesResponse, ErrorResponse, FileEntry, ResumeUploadResponse, ServerFileEntry, UploadedPart } from "./models";
+import { DeleteFilesResponse, DownloadFileResponse, ErrorResponse, FileEntry, ResumeUploadResponse, ServerFileEntry, UploadedPart } from "./models";
 
 const BASE_URL = "http://localhost:8080";
 
@@ -37,6 +37,8 @@ const getActionLabel = (entry: FileEntry) => {
     if (entry.status === "uploading" && entry.uploadId) return "Pause";
     return null;
 };
+
+const canDownload = (entry: FileEntry) => entry.status === "complete" && Boolean(entry.uploadId);
 
 const sortParts = (parts: UploadedPart[]) => [...parts].sort((left, right) => left.part - right.part);
 
@@ -82,6 +84,39 @@ const completeUpload = async (entryId: string, uploadId: string, parts: Uploaded
 
     clearUploadState(entryId);
     updateEntry(entryId, { status: "complete", statusText: "Uploaded" });
+};
+
+const downloadFile = async (entryId: string) => {
+    const entry = files.find((item) => item.id === entryId);
+
+    if (!entry?.uploadId || entry.status !== "complete") {
+        return;
+    }
+
+    try {
+        const response = await fetch(`${BASE_URL}/files/download`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                userId: requireUserId(),
+                fileId: entry.uploadId,
+            }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json() as ErrorResponse;
+            throw new Error(error.reason || error.error || "Download request failed");
+        }
+
+        const { url } = await response.json() as DownloadFileResponse;
+        const downloadWindow = window.open(url, "_blank", "noopener,noreferrer");
+
+        if (!downloadWindow) {
+            throw new Error("Unable to open download tab. Check your pop-up blocker.");
+        }
+    } catch (error) {
+        throw error instanceof Error ? error : new Error("Download failed");
+    }
 };
 
 const resumeFileUpload = async (entryId: string) => {
@@ -171,13 +206,19 @@ const renderFileList = () => {
                 <div class="file-item-row">
                     <input type="checkbox" class="file-checkbox" data-id="${f.id}" ${f.selected ? 'checked' : ''}>
                     <div class="file-item-info">
+                        <div>
                         <div class="file-item-name">${f.fileName}</div>
+                        <div></div>
+                        </div>
                         <div class="file-item-meta">
                             <span>${formatSize(f.fileSize)}</span>
                             <span class="file-item-status file-item-status--${f.status}">${f.statusText}</span>
                         </div>
                     </div>
-                    ${getActionLabel(f) ? `<button type="button" class="file-action-btn" data-action="toggle-upload" data-id="${f.id}">${getActionLabel(f)}</button>` : ""}
+                    <div class="file-item-actions">
+                        ${getActionLabel(f) ? `<button type="button" class="file-action-btn" data-action="toggle-upload" data-id="${f.id}">${getActionLabel(f)}</button>` : ""}
+                        ${canDownload(f) ? `<button type="button" class="file-action-btn" data-action="download" data-id="${f.id}">Download</button>` : ""}
+                    </div>
                 </div>
             </li>`
         )
@@ -198,6 +239,17 @@ const renderFileList = () => {
         button.addEventListener("click", async () => {
             const entry = files.find((item) => item.id === button.dataset.id);
             if (!entry) return;
+
+            if (button.dataset.action === "download") {
+                try {
+                    await downloadFile(entry.id);
+                } catch (error) {
+                    updateEntry(entry.id, {
+                        statusText: error instanceof Error ? error.message : "Download failed",
+                    });
+                }
+                return;
+            }
 
             if (entry.status === "paused") {
                 await resumeFileUpload(entry.id);

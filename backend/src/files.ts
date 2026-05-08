@@ -1,6 +1,6 @@
 import { randomUUIDv7 } from "bun";
 import { MAX_CHUNK_SIZE } from "./constants";
-import { createMultipartUpload, abortFileUpload, completeUpload, getUploadedParts, getPreSignedUrlsForParts } from "./minio";
+import { createMultipartUpload, abortFileUpload, completeUpload, getUploadedParts, getPreSignedUrlsForParts, getPreSignedUrlForDownload } from "./minio";
 import { createUploadRecord, getFilesByUserId, getUploadByUploadAndUserId, markUploadForDeletion, markUploadAborted, markUploadCompleted, setErrorReason } from "./upload";
 import type { UploadRecord } from "./models/models";
 
@@ -147,6 +147,29 @@ export const uploadAbortion = async (userId: string, uploadId: string) => {
 export const getUploadedFiles = async (userId: string) => {
     const files = await getFilesByUserId(userId);
     return files;
+}
+
+export const downloadFile = async (userId: string, fileId: string) => {
+    const uploadedRecord = ensureUploadExists(await getUploadByUploadAndUserId(userId, fileId), fileId);
+
+    if (uploadedRecord.status !== "completed") {
+        throw new Error("File is not available for download.");
+    }
+
+    try {
+        const url = await getPreSignedUrlForDownload(
+            uploadedRecord.object_key,
+            uploadedRecord.original_file_name,
+        );
+        return {
+            url,
+            fileName: uploadedRecord.original_file_name,
+        };
+    } catch (error) {
+        console.error("Failed to get pre-signed URL for download", error);
+        throw new Error("Failed to get download URL. Please try again.");
+    }
+
 }
 
 export const markSelectedFilesForDeletion = async (userId: string, fileIds: string[]) => {

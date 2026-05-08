@@ -88,6 +88,19 @@ export const getPreSignedUrlsForParts = async (objectKey: string, uploadId: stri
     return urls;
 }
 
+export const getPreSignedUrlForDownload = async (objectKey: string, fileName: string) => {
+    const bucketName = await getOrCreateBucket();
+
+    try {
+        await minioClient.statObject(bucketName, objectKey);
+    } catch (e) {
+        throw new Error("File not found");
+    }
+
+    return minioClient.presignedUrl("GET", bucketName, objectKey, 1800, {"response-content-disposition": `attachment; filename="${fileName.replace(/"/g, "")}"`,
+    }); // URL valid for 30 minutes
+}
+
 export const createMultipartUpload = async (objectKey: string, chunks: number, contentType: string) => {
 
     const bucketName = await getOrCreateBucket();

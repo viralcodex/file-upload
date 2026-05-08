@@ -237,6 +237,13 @@ h1 {
     flex: 1;
 }
 
+.file-item-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
 .file-item-name {
     font-weight: 700;
     word-break: break-all;

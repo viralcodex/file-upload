@@ -1,7 +1,7 @@
 import { createServer } from "http";
 import express from "express";
 import console from "console";
-import { markSelectedFilesForDeletion, getUploadedFiles, startUploadSession, uploadAbortion, uploadCompletion, resumeUpload } from "./src/files";
+import { markSelectedFilesForDeletion, getUploadedFiles, startUploadSession, uploadAbortion, uploadCompletion, resumeUpload, downloadFile } from "./src/files";
 import { MAX_FIZE_SIZE } from "./src/constants";
 import dotenv from "dotenv";
 import { getOrCreateUserId } from "./src/user";
@@ -40,6 +40,20 @@ app.post("/users", async (req, res) => {
         return res.status(500).json({ error: "Failed to create user" });
     }
 });
+
+app.get("/files", async (req, res) => {
+    const userId = req.query.userId as string | undefined;
+    if (userId == null) {
+        return res.status(400).json({
+            status: "error",
+            reason: "missing userId"
+        });
+    }
+    const files = await getUploadedFiles(userId);
+
+    return res.json(files);
+});
+
 
 app.post("/upload/init", async (req, res) => {
     const { userId, fileName, fileSize, contentType } = req.body;
@@ -140,18 +154,35 @@ app.post("/upload/abort", async (req, res) => {
     }
 });
 
-app.get("/files", async (req, res) => {
-    const userId = req.query.userId as string | undefined;
-    if(userId == null)
-    {
+app.post("/files/download", async (req, res) => {
+    const { userId, fileId } = req.body;
+    
+    if (!userId || !fileId) {
         return res.status(400).json({
             status: "error",
-            reason: "missing userId"
+            reason: "userId and fileId are required"
         });
     }
-    const files = await getUploadedFiles(userId);
 
-    return res.json(files);
+    try {
+        const downloadInfo = await downloadFile(userId, fileId);
+        return res.json(downloadInfo);
+    } catch (error) {
+        const reason = error instanceof Error ? error.message : "Failed to download file";
+
+        if (reason.startsWith("No uploads found for ID:")) {
+            return res.status(404).json({
+                status: "error",
+                reason,
+            });
+        }
+
+        console.error("Failed to download file", error);
+        return res.status(500).json({
+            status: "error",
+            reason,
+        });
+    }
 });
 
 app.post("/files/delete", async (req, res) => {

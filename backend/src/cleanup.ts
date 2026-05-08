@@ -14,14 +14,14 @@ const cleanup = async () => {
             try {
                 const aborted = await abortFileUpload(upload.object_key, upload.upload_id);
                 if (!aborted) {
-                    await setErrorReason(upload.upload_id, "Background cleanup could not abort multipart upload");
+                    await setErrorReason(upload.user_id, upload.upload_id, "Background cleanup could not abort multipart upload");
                     return;
                 }
-                await markUploadAborted(upload.upload_id, upload.object_key);
+                await markUploadAborted(upload.user_id, upload.upload_id);
                 console.log(`Cleaned upload ${upload.upload_id}`);
             } catch (e) {
                 const reason = e instanceof Error ? e.message : "Background cleanup failed";
-                await setErrorReason(upload.upload_id, reason);
+                await setErrorReason(upload.user_id, upload.upload_id, reason);
                 console.error(`Cleanup failed for ${upload.upload_id}`, e);
             }
         })
@@ -43,7 +43,7 @@ const cleanup = async () => {
 
         await Promise.all(
             failedUploads.map((upload) =>
-                setErrorReason(upload.upload_id, "Deletion failed in object storage")
+                setErrorReason(upload.user_id, upload.upload_id, "Deletion failed in object storage")
             )
         );
 
@@ -57,7 +57,7 @@ const cleanup = async () => {
     } catch (e) {
         await Promise.all(
             markedForDelete.map((upload) =>
-                setErrorReason(upload.upload_id, "Delete process failed")
+                setErrorReason(upload.user_id, upload.upload_id, "Delete process failed")
             )
         );
         throw new Error("Delete process failed: " + e);
